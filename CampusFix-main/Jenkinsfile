@@ -1,0 +1,126 @@
+pipeline {
+    agent any
+
+    // No Docker anywhere in this pipeline. The Jenkins agent must have
+    // Git, Node.js (>=18), and npm available on PATH.
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        // Populate these as Jenkins credentials / global env vars — never hardcode.
+        MONGO_URI   = credentials('campusfix-mongo-uri')
+        JWT_SECRET  = credentials('campusfix-jwt-secret')
+        CLIENT_URL  = 'http://localhost:5173'
+        PORT        = '5000'
+        NODE_ENV    = 'test'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('server') { sh 'npm ci || npm install' }
+                dir('client') { sh 'npm ci || npm install' }
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                dir('server') { sh 'npm run lint' }
+                dir('client') { sh 'npm run lint' }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                dir('server') {
+                    sh 'npm test -- --ci'
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'server/junit.xml'
+                }
+            }
+        }
+
+        stage('Build Frontend') {
+            steps {
+                dir('client') { sh 'npm run build' }
+            }
+        }
+
+        stage('Build Backend') {
+            steps {
+                // No transpile step required for the Node/Express backend;
+                // this stage validates the app boots cleanly (fails fast on syntax/import errors).
+                dir('server') { sh 'node -e "require(\'./src/app.js\'); console.log(\'app module loads OK\')"' }
+            }
+        }
+
+        stage('Start Application') {
+            steps {
+                dir('server') {
+                    sh '''
+                        nohup npm start > server.log 2>&1 &
+                        echo $! > server.pid
+                        sleep 5
+                    '''
+                }
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                sh '''
+                    curl -sf http://localhost:${PORT}/api/health || (cat server/server.log && exit 1)
+                '''
+            }
+        }
+
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Deployment stage placeholder.'
+                echo 'Configure Jenkins credentials for the target platform, then:'
+                echo '  Frontend  -> deploy client/dist to Vercel/Netlify (e.g. via their CLI)'
+                echo '  Backend   -> deploy server/ to Render/Railway (e.g. via their CLI or git push)'
+                echo 'This stage intentionally does nothing destructive until those credentials exist.'
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                sh 'curl -sf http://localhost:${PORT}/api/health'
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                if [ -f server/server.pid ]; then
+                    kill $(cat server/server.pid) || true
+                fi
+            '''
+            archiveArtifacts artifacts: 'client/dist/**', allowEmptyArchive: true
+        }
+        success {
+            echo 'CampusFix pipeline completed successfully.'
+        }
+        failure {
+            echo 'CampusFix pipeline failed — check the stage logs above.'
+        }
+    }
+}

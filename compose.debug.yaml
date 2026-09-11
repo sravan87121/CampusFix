@@ -1,0 +1,6 @@
+services:
+  campusfixmain:
+    image: campusfixmain
+    build:
+      context: .
+      dockerfile: ./Dockerfile
